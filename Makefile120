@@ -1,0 +1,69 @@
+# =============================================================================
+#  Makefile120  -  Multi-architecture build for wifSolver_v4
+#
+#  Builds ONE "fat" binary that runs with NATIVE machine code on:
+#     * RTX 40-series  (Ada,       sm_89)   <- your 4090
+#     * RTX 50-series  (Blackwell, sm_120)  <- your 5090
+#  and carries PTX (compute_120) so future GPUs can still JIT-run it.
+#
+#  REQUIREMENTS:
+#     * CUDA Toolkit 12.8 or newer   (sm_120 / Blackwell does NOT exist in
+#       any toolkit older than 12.8 -- nvcc literally cannot emit code for it)
+#     * Recent NVIDIA driver         (Linux r570+, Windows 572/576+)
+#     * BEFORE building, apply the sha256.cu __CUDA_ARCH__ >= 999 fix
+#       (those guards re-enable removed vshr/vadd PTX on Blackwell -> build error)
+#
+#  Verify your toolkit first:   nvcc --version    (must report 12.8+)
+#  Then build:                  make -f Makefile120
+# =============================================================================
+
+CXX=g++
+CXXFLAGS=-std=c++11 -m64 -mssse3 -Wno-unused-result -Wno-write-strings -O2 -I. -I$(CUDA)/include
+
+NVCC=nvcc
+CUDA_HOME=/usr/local/cuda
+CUDA_LIB=${CUDA_HOME}/lib64
+CUDA_INCLUDE=${CUDA_HOME}/include
+LFLAGS     = -lpthread -L$(CUDA_HOME)/lib64 -lcudart
+CXXCUDA    = /usr/bin/g++
+
+# --- The fix lives here: emit native SASS for BOTH cards, plus PTX fallback ---
+#   arch=compute_XX,code=sm_XX        -> native machine code (cubin) for that GPU
+#   arch=compute_120,code=compute_120 -> embed PTX so newer GPUs can JIT later
+GENCODE = -gencode=arch=compute_89,code=sm_89 \
+          -gencode=arch=compute_120,code=sm_120 \
+          -gencode=arch=compute_120,code=compute_120
+
+NVCCFLAGS = --ptxas-options=-v -maxrregcount=0 --compile --compiler-options -fPIC \
+            -ccbin $(CXXCUDA) -m64 -O2 -I$(CUDA)/include $(GENCODE)
+
+CUSRC:=$(wildcard *.cu)
+MKDIR_P = mkdir -p
+OBJDIR = obj
+
+all:
+	mkdir -p $(OBJDIR)
+	$(CXX) $(CXXFLAGS) -o $(OBJDIR)/ripemd160.o -c lib/hash/ripemd160.cpp
+	$(CXX) $(CXXFLAGS) -o $(OBJDIR)/ripemd160_sse.o -c lib/hash/ripemd160_sse.cpp
+	$(CXX) $(CXXFLAGS) -o $(OBJDIR)/sha256cpp.o -c lib/hash/sha256.cpp
+	$(CXX) $(CXXFLAGS) -o $(OBJDIR)/sha256_sse.o -c lib/hash/sha256_sse.cpp
+	gcc -O3 -c lib/base58.c -o $(OBJDIR)/base58.o
+	$(CXX) -O3 -c lib/util.cpp -o $(OBJDIR)/util.o
+	gcc -O3 -c Timer.cpp -o $(OBJDIR)/Timer.o
+	$(CXX) $(CXXFLAGS) -c lib/Int.cpp -o $(OBJDIR)/Int.o
+	$(CXX) $(CXXFLAGS) -c lib/Point.cpp -o $(OBJDIR)/Point.o
+	$(CXX) $(CXXFLAGS) -c lib/SECP256K1.cpp -o $(OBJDIR)/SECP256K1.o
+	$(CXX) $(CXXFLAGS) -c lib/IntGroup.cpp -o $(OBJDIR)/IntGroup.o
+	$(CXX) $(CXXFLAGS) -c lib/IntMod.cpp -o $(OBJDIR)/IntMod.o
+	$(CXX) $(CXXFLAGS) -c Timer.cpp -o $(OBJDIR)/Timer.o
+
+	$(NVCC) $(NVCCFLAGS) -o $(OBJDIR)/sha256.o  -c lib/hash/sha256.cu
+	$(NVCC) $(NVCCFLAGS) -o $(OBJDIR)/Worker1.o -c Worker1.cu
+	$(NVCC) $(NVCCFLAGS) -o $(OBJDIR)/main.o    -c main.cu
+
+	@echo Building Multi-Prefix WifSolver \(sm_89 + sm_120\)...
+	$(CXX) $(OBJDIR)/ripemd160.o $(OBJDIR)/ripemd160_sse.o $(OBJDIR)/sha256cpp.o $(OBJDIR)/sha256_sse.o $(OBJDIR)/base58.o $(OBJDIR)/util.o $(OBJDIR)/Int.o $(OBJDIR)/Point.o $(OBJDIR)/SECP256K1.o $(OBJDIR)/IntGroup.o $(OBJDIR)/IntMod.o $(OBJDIR)/Timer.o $(OBJDIR)/sha256.o $(OBJDIR)/Worker1.o $(OBJDIR)/main.o $(LFLAGS) -o multiPrefixWIF
+
+clean:
+	@echo Cleaning...
+	@rm -f $(OBJDIR)/*.o
